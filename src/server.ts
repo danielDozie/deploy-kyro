@@ -395,5 +395,5 @@ const server = createServer(async (req: IncomingMessage, res: ServerResponse) =>
 });
 
 server.listen(PORT, () => {
-  console.log(`🚀 Deploy Server running on http://localhost:${PORT}`);
+  console.log(`🚀 Deploy Server running on port ${PORT}`);
 });
