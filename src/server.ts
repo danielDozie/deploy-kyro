@@ -106,7 +106,11 @@ function spawnStreaming(
 // ── HTTP Server ───────────────────────────────────────────────────────────────
 
 const server = createServer(async (req: IncomingMessage, res: ServerResponse) => {
-  const reqUrl = new URL(req.url || '/', `http://${req.headers.host || `localhost:${PORT}`}`);
+  const host = req.headers.host ?? `localhost:${PORT}`;
+  const rawHeader = req.headers['x-forwarded-proto'];
+  const rawProto = (Array.isArray(rawHeader) ? rawHeader[0] : rawHeader) ?? '';
+  const proto = rawProto.split(',')[0]?.trim() || (host.includes('localhost') ? 'http' : 'https');
+  const reqUrl = new URL(req.url || '/', `${proto}://${host}`);
   const pathname = reqUrl.pathname;
   const method = req.method || 'GET';
 
