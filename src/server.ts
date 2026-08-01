@@ -283,12 +283,11 @@ const server = createServer(async (req: IncomingMessage, res: ServerResponse) =>
       await spawnStreaming(
         res,
         'scaffold',
-        'npm',
+        'npx',
         [
-          'create',
-          'kyro@latest',
-          projectDir,
           '--yes',
+          'create-kyro@latest',
+          projectDir,
           `--template=${template}`,
           `--database=${database}`,
           `--admin-email=${adminEmail}`,
