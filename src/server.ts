@@ -2,9 +2,10 @@ import { createServer, type IncomingMessage, type ServerResponse } from 'node:ht
 import os from 'node:os';
 import process from 'node:process';
 import { URL } from 'node:url';
-import { createProject } from '@kyro-cms/create-kyro/headless';
-import { deployCloudflare } from '@kyro-cms/create-kyro/deployers/cloudflare';
-import { warmPackageStore, fastInstall, PKG_MANAGER } from './installer.js';
+import { spawn } from 'node:child_process';
+import { mkdirSync, rmSync, existsSync } from 'node:fs';
+import { join } from 'node:path';
+import { randomBytes } from 'node:crypto';
 
 try {
   process.loadEnvFile();
@@ -14,9 +15,11 @@ try {
 
 const PORT = Number(process.env.PORT) || 3099;
 
-// Cloudflare OAuth App Client ID (Wrangler OAuth ID or custom app ID)
+// Cloudflare OAuth App Client ID
 const CF_CLIENT_ID = process.env.CF_CLIENT_ID || process.env.CLOUDFLARE_CLIENT_ID || '';
 const CF_CLIENT_SECRET = process.env.CF_CLIENT_SECRET || process.env.CLOUDFLARE_CLIENT_SECRET || '';
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
 
 function sendSSE(res: ServerResponse, data: unknown) {
   res.write(`data: ${JSON.stringify(data)}\n\n`);
@@ -40,14 +43,76 @@ function parseBody<T>(req: IncomingMessage): Promise<T> {
   });
 }
 
+function generatePassword(length = 16): string {
+  const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
+  const bytes = randomBytes(length);
+  return Array.from(bytes, (b) => chars[b % chars.length]).join('');
+}
+
+/**
+ * Spawn a subprocess and stream its output line-by-line as SSE events.
+ * Resolves with the full stdout string when the process exits with code 0.
+ * Rejects with an Error on non-zero exit.
+ */
+function spawnStreaming(
+  res: ServerResponse,
+  step: string,
+  cmd: string,
+  args: string[],
+  opts: { cwd?: string; env?: NodeJS.ProcessEnv } = {}
+): Promise<string> {
+  return new Promise((resolve, reject) => {
+    console.log(`[spawn] ${cmd} ${args.join(' ')} (cwd: ${opts.cwd ?? process.cwd()})`);
+
+    const child = spawn(cmd, args, {
+      cwd: opts.cwd,
+      env: opts.env ?? process.env,
+      shell: true,
+    });
+
+    let fullOutput = '';
+    let lastLine = '';
+
+    const onData = (data: Buffer) => {
+      const text = data.toString();
+      fullOutput += text;
+
+      // Emit each non-empty line as an SSE event
+      const lines = text.split('\n');
+      for (const raw of lines) {
+        const line = raw.trim();
+        if (line && line !== lastLine) {
+          lastLine = line;
+          sendSSE(res, { type: 'info', step, message: line });
+        }
+      }
+    };
+
+    child.stdout?.on('data', onData);
+    child.stderr?.on('data', onData);
+
+    child.on('close', (code) => {
+      if (code === 0) {
+        resolve(fullOutput);
+      } else {
+        reject(new Error(`Process exited with code ${code}`));
+      }
+    });
+
+    child.on('error', reject);
+  });
+}
+
+// ── HTTP Server ───────────────────────────────────────────────────────────────
+
 const server = createServer(async (req: IncomingMessage, res: ServerResponse) => {
-  const reqUrl = new URL(req.url || '/', `http://${req.headers.host || 'localhost:3099'}`);
+  const reqUrl = new URL(req.url || '/', `http://${req.headers.host || `localhost:${PORT}`}`);
   const pathname = reqUrl.pathname;
   const method = req.method || 'GET';
 
   console.log(`[${new Date().toISOString()}] ${method} ${pathname}`);
 
-  // Handle CORS preflight
+  // CORS preflight
   if (method === 'OPTIONS') {
     res.writeHead(204, {
       'Access-Control-Allow-Origin': '*',
@@ -58,14 +123,14 @@ const server = createServer(async (req: IncomingMessage, res: ServerResponse) =>
     return;
   }
 
-  // Health check endpoint
+  // Health check
   if (pathname === '/health' && method === 'GET') {
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ status: 'ok', uptime: process.uptime() }));
     return;
   }
 
-  // ── Cloudflare OAuth Login Endpoint ──────────────────────────────────────
+  // ── Cloudflare OAuth Login ────────────────────────────────────────────────
   if (pathname === '/api/auth/cloudflare' && method === 'GET') {
     const redirectUri = `${reqUrl.origin}/api/auth/cloudflare/callback`;
     const state = Math.random().toString(36).substring(2);
@@ -74,10 +139,10 @@ const server = createServer(async (req: IncomingMessage, res: ServerResponse) =>
     authUrl.searchParams.set('response_type', 'code');
     authUrl.searchParams.set('client_id', CF_CLIENT_ID);
     authUrl.searchParams.set('redirect_uri', redirectUri);
-    const scope = process.env.CF_SCOPE || 'account:read d1:write workers-kv-storage:write workers-r2:write workers-scripts:write';
-    if (scope) {
-      authUrl.searchParams.set('scope', scope);
-    }
+    const scope =
+      process.env.CF_SCOPE ||
+      'account:read d1:write workers-kv-storage:write workers-r2:write workers-scripts:write';
+    if (scope) authUrl.searchParams.set('scope', scope);
     authUrl.searchParams.set('state', state);
 
     console.log('[OAuth Redirect URL]:', authUrl.toString());
@@ -86,7 +151,7 @@ const server = createServer(async (req: IncomingMessage, res: ServerResponse) =>
     return;
   }
 
-  // ── Cloudflare OAuth Callback Endpoint ──────────────────────────────────
+  // ── Cloudflare OAuth Callback ─────────────────────────────────────────────
   if (pathname === '/api/auth/cloudflare/callback' && method === 'GET') {
     const code = reqUrl.searchParams.get('code');
     const errorParam = reqUrl.searchParams.get('error');
@@ -94,14 +159,19 @@ const server = createServer(async (req: IncomingMessage, res: ServerResponse) =>
     const redirectUri = `${reqUrl.origin}/api/auth/cloudflare/callback`;
 
     if (!code) {
-      console.error('[Cloudflare Auth Callback Error]:', { error: errorParam, description: errorDesc, query: Object.fromEntries(reqUrl.searchParams) });
+      console.error('[Cloudflare Auth Callback Error]:', {
+        error: errorParam,
+        description: errorDesc,
+        query: Object.fromEntries(reqUrl.searchParams),
+      });
       res.writeHead(400, { 'Content-Type': 'text/html' });
-      res.end(`<h1>Authentication Failed</h1><p>${errorDesc || errorParam || 'Missing authorization code.'}</p>`);
+      res.end(
+        `<h1>Authentication Failed</h1><p>${errorDesc || errorParam || 'Missing authorization code.'}</p>`
+      );
       return;
     }
 
     try {
-      // Exchange code for OAuth access_token
       const tokenRes = await fetch('https://dash.cloudflare.com/oauth2/token', {
         method: 'POST',
         headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
@@ -118,24 +188,22 @@ const server = createServer(async (req: IncomingMessage, res: ServerResponse) =>
       const accessToken = tokenData.access_token || tokenData.result?.access_token;
 
       if (!accessToken) {
-        throw new Error(tokenData.error_description || tokenData.errors?.[0]?.message || 'Failed to exchange OAuth token');
+        throw new Error(
+          tokenData.error_description || tokenData.errors?.[0]?.message || 'Failed to exchange OAuth token'
+        );
       }
 
-      // Get authenticated user info
       let userEmail = 'Cloudflare User';
       try {
         const userRes = await fetch('https://api.cloudflare.com/client/v4/user', {
           headers: { Authorization: `Bearer ${accessToken}` },
         });
         const userData = (await userRes.json()) as any;
-        if (userData.result?.email) {
-          userEmail = userData.result.email;
-        }
+        if (userData.result?.email) userEmail = userData.result.email;
       } catch {
         // Non-fatal profile fetch fallback
       }
 
-      // Send postMessage back to parent window (DeployModal popup handler) and close popup
       const html = `<!DOCTYPE html>
 <html>
 <head><title>Cloudflare Authentication</title></head>
@@ -167,11 +235,11 @@ const server = createServer(async (req: IncomingMessage, res: ServerResponse) =>
     }
   }
 
-  // One-click deploy endpoint: POST /deploy-cloudflare
+  // ── One-click Deploy: POST /deploy-cloudflare ─────────────────────────────
   if (pathname === '/deploy-cloudflare' && method === 'POST') {
     const body = await parseBody<any>(req);
 
-    // Set SSE headers for real-time progress streaming
+    // SSE headers
     res.writeHead(200, {
       'Content-Type': 'text/event-stream',
       'Cache-Control': 'no-cache, no-transform',
@@ -180,58 +248,144 @@ const server = createServer(async (req: IncomingMessage, res: ServerResponse) =>
       'Access-Control-Allow-Origin': '*',
     });
 
-    // Send initial ping to establish connection immediately
+    // Initial ping to establish connection
     res.write(': ping\n\n');
 
-    const projectName = body.projectName || `kyro-app-${Date.now()}`;
-    const targetDir = body.cwd || os.tmpdir();
+    const projectName = (body.projectName || `kyro-app-${Date.now()}`).trim();
+    const template: string = body.template || 'minimal';
+    const database: string = body.database === 'postgres' ? 'postgres' : 'sqlite';
+    const adminEmail: string = body.adminEmail || `admin@${projectName}.local`;
+    const adminPassword: string =
+      body.adminPassword || generatePassword();
 
-    // 1. Scaffold project in temporary directory
-    sendSSE(res, { type: 'info', step: 'scaffold', message: '🛠 Scaffolding project files...' });
+    const cloudflareApiToken: string =
+      body.cloudflareApiToken || body.token || body.accessToken || '';
 
-    const scaffoldResult = await createProject({
-      projectName,
-      database: body.database === 'postgres' ? 'postgres' : 'sqlite',
-      template: body.template || 'minimal',
-      adminEmail: body.adminEmail || `admin@${projectName}.local`,
-      cwd: targetDir,
-      // Use server-side fast installer instead of the default npm install
-      installer: (projectDir, onProgress) => fastInstall(projectDir, onProgress),
-      onProgress(step: string, detail?: string) {
-        sendSSE(res, { type: 'info', step, message: detail || step });
-      },
-    });
+    const workerName: string = (body.workerName || projectName).trim();
+    const r2Bucket: string = (body.r2Bucket || `kyro-media-${Date.now()}`).trim();
+    const databaseUrl: string = body.databaseUrl || '';
+    const hyperdriveName: string = body.hyperdriveName || '';
 
-    if (!scaffoldResult.ok) {
-      sendSSE(res, { type: 'error', step: 'scaffold', message: scaffoldResult.error });
+    // Create a unique temp directory for this deployment
+    const deployId = randomBytes(4).toString('hex');
+    const baseDir = join(os.tmpdir(), `kyro-deploy-${deployId}`);
+    const projectDir = join(baseDir, projectName);
+    mkdirSync(baseDir, { recursive: true });
+
+    try {
+      // ── Step 1: Scaffold ──────────────────────────────────────────────────
+      sendSSE(res, { type: 'info', step: 'scaffold', message: '🛠  Bootstrapping fresh Kyro project…' });
+
+      await spawnStreaming(
+        res,
+        'scaffold',
+        'npm',
+        [
+          'create',
+          'kyro@latest',
+          projectDir,
+          '--yes',
+          `--template=${template}`,
+          `--database=${database}`,
+          `--admin-email=${adminEmail}`,
+          '--non-interactive',
+        ],
+        { cwd: baseDir, env: { ...process.env, npm_config_loglevel: 'warn' } }
+      );
+
+      sendSSE(res, {
+        type: 'success',
+        step: 'scaffold',
+        message: `✔ Project scaffolded in ${projectDir}`,
+      });
+
+      // ── Step 2: Deploy via CLI ────────────────────────────────────────────
+      sendSSE(res, {
+        type: 'info',
+        step: 'deploy',
+        message: '☁️  Deploying to Cloudflare Workers via CLI…',
+      });
+
+      const cliArgs = [
+        '@kyro-cms/core',
+        'deploy',
+        'cloudflare',
+        '--non-interactive',
+        '--quiet',
+        '--json',
+        '--name', workerName,
+        '--r2-bucket', r2Bucket,
+        '--email', adminEmail,
+        '--password', adminPassword,
+      ];
+
+      if (database === 'postgres') {
+        cliArgs.push('--database', 'postgres');
+        if (databaseUrl) cliArgs.push('--database-url', databaseUrl);
+        if (hyperdriveName) cliArgs.push('--hyperdrive-name', hyperdriveName);
+      }
+
+      const cliEnv: NodeJS.ProcessEnv = {
+        ...process.env,
+        // Pass the Cloudflare token so wrangler can auth without a browser login
+        ...(cloudflareApiToken ? { CLOUDFLARE_API_TOKEN: cloudflareApiToken } : {}),
+      };
+
+      const cliOutput = await spawnStreaming(
+        res,
+        'deploy',
+        'npx',
+        cliArgs,
+        { cwd: projectDir, env: cliEnv }
+      );
+
+      // Parse the final JSON line emitted by `kyro deploy cloudflare --json`
+      const lines = cliOutput.split('\n').reverse();
+      let resultData: { ok: boolean; liveUrl?: string; adminEmail?: string; adminPassword?: string } | null = null;
+
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (trimmed.startsWith('{')) {
+          try {
+            const parsed = JSON.parse(trimmed);
+            if (typeof parsed.ok === 'boolean') {
+              resultData = parsed;
+              break;
+            }
+          } catch {
+            // not the JSON line we're looking for
+          }
+        }
+      }
+
+      if (!resultData?.ok) {
+        throw new Error(resultData?.adminEmail ?? 'Deploy CLI did not report success');
+      }
+
+      sendSSE(res, {
+        type: 'done',
+        data: {
+          liveUrl: resultData.liveUrl ?? '',
+          adminEmail: resultData.adminEmail ?? adminEmail,
+          adminPassword: resultData.adminPassword ?? adminPassword,
+        },
+      });
+    } catch (err: any) {
+      console.error('[Deploy Error]:', err);
+      const msg = err?.message ?? String(err);
+      sendSSE(res, { type: 'error', step: 'deploy', message: msg });
+    } finally {
       res.end();
-      return;
+      // Clean up temp dir in background (non-blocking, best-effort)
+      setTimeout(() => {
+        try {
+          if (existsSync(baseDir)) rmSync(baseDir, { recursive: true, force: true });
+        } catch {
+          // non-fatal
+        }
+      }, 5_000);
     }
 
-    sendSSE(res, { type: 'success', step: 'scaffold', message: `Project scaffolded in ${scaffoldResult.projectDir}` });
-
-    // 2. Provision & Deploy to Cloudflare
-    sendSSE(res, { type: 'info', step: 'deploy', message: '☁️ Provisioning & deploying to Cloudflare Workers...' });
-
-    const deployer = deployCloudflare({
-      projectDir: scaffoldResult.projectDir,
-      projectName: body.workerName || projectName,
-      r2Bucket: body.r2Bucket,
-      database: body.database === 'postgres' ? 'postgres' : 'd1',
-      databaseUrl: body.databaseUrl,
-      hyperdriveName: body.hyperdriveName,
-      adminEmail: scaffoldResult.adminEmail,
-      adminPassword: scaffoldResult.adminPassword,
-      cloudflareApiToken: body.cloudflareApiToken || body.token || body.accessToken,
-      packager: PKG_MANAGER,
-    });
-
-    for await (const event of deployer) {
-      sendSSE(res, event);
-      if (event.type === 'done' || event.type === 'error') break;
-    }
-
-    res.end();
     return;
   }
 
@@ -241,7 +395,5 @@ const server = createServer(async (req: IncomingMessage, res: ServerResponse) =>
 });
 
 server.listen(PORT, () => {
-  console.log(`🚀 Standalone Deploy Server running on http://localhost:${PORT}`);
-  // Warm package store in background so first deploy is fast
-  warmPackageStore().catch(() => {});
+  console.log(`🚀 Deploy Server running on http://localhost:${PORT}`);
 });
