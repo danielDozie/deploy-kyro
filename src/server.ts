@@ -66,7 +66,12 @@ function spawnStreaming(
 
     const child = spawn(cmd, args, {
       cwd: opts.cwd,
-      env: opts.env ?? process.env,
+      env: {
+        ...process.env,
+        CI: 'true',
+        FORCE_COLOR: '1',
+        ...opts.env,
+      },
       shell: true,
     });
 
@@ -255,6 +260,18 @@ const server = createServer(async (req: IncomingMessage, res: ServerResponse) =>
     // Initial ping to establish connection
     res.write(': ping\n\n');
 
+    // Periodic ping every 10s to keep connection alive on Render / proxies
+    const pingInterval = setInterval(() => {
+      try {
+        res.write(': ping\n\n');
+        if (typeof (res as any).flush === 'function') {
+          (res as any).flush();
+        }
+      } catch {
+        clearInterval(pingInterval);
+      }
+    }, 10_000);
+
     const projectName = (body.projectName || `kyro-app-${Date.now()}`).trim();
     const template: string = body.template || 'minimal';
     const database: string = body.database === 'postgres' ? 'postgres' : 'sqlite';
@@ -378,6 +395,7 @@ const server = createServer(async (req: IncomingMessage, res: ServerResponse) =>
       const msg = err?.message ?? String(err);
       sendSSE(res, { type: 'error', step: 'deploy', message: msg });
     } finally {
+      clearInterval(pingInterval);
       res.end();
       // Clean up temp dir in background (non-blocking, best-effort)
       setTimeout(() => {
