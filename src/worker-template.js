@@ -21,10 +21,12 @@ export async function getKyroWorkerScript(customUrl) {
     }
     try {
         console.log(`[Kyro Bundle] Fetching core bundle from GitHub: ${targetUrl}`);
+        const token = process.env.GITHUB_TOKEN || process.env.GH_TOKEN;
         const res = await fetch(targetUrl, {
             headers: {
                 'User-Agent': 'Kyro-Deploy-Server/1.0',
-                ...(process.env.GITHUB_TOKEN ? { Authorization: `token ${process.env.GITHUB_TOKEN}` } : {}),
+                'Accept': 'application/vnd.github.v3.raw, text/plain, */*',
+                ...(token ? { Authorization: `token ${token}` } : {}),
             },
         });
         if (res.ok) {
