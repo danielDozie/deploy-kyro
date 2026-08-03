@@ -17,20 +17,19 @@ const DEFAULT_GITHUB_BUNDLE_URL =
  * Fetch the latest Kyro CMS Core JavaScript bundle from GitHub
  */
 export async function getKyroWorkerScript(customUrl?: string): Promise<string> {
-  const targetUrl = customUrl || DEFAULT_GITHUB_BUNDLE_URL;
-  const now = Date.now();
-
-  // Return cached bundle if still valid
-  if (cachedBundle && now - lastFetchTime < CACHE_TTL_MS && !customUrl) {
-    return cachedBundle;
-  }
+  const baseUrl = customUrl || DEFAULT_GITHUB_BUNDLE_URL;
+  // Append cache buster parameter to prevent GitHub raw CDN or local cache from returning old bundle
+  const separator = baseUrl.includes('?') ? '&' : '?';
+  const targetUrl = `${baseUrl}${separator}t=${Date.now()}`;
 
   try {
-    console.log(`[Kyro Bundle] Fetching core bundle from GitHub: ${targetUrl}`);
+    console.log(`[Kyro Bundle] Fetching fresh core bundle from GitHub: ${targetUrl}`);
     const token = process.env.GITHUB_TOKEN || process.env.GH_TOKEN;
     const res = await fetch(targetUrl, {
+      cache: 'no-store',
       headers: {
         'User-Agent': 'Kyro-Deploy-Server/1.0',
+        'Cache-Control': 'no-cache, no-store',
         'Accept': 'application/vnd.github.v3.raw, text/plain, */*',
         ...(token ? { Authorization: `token ${token}` } : {}),
       },
@@ -39,8 +38,6 @@ export async function getKyroWorkerScript(customUrl?: string): Promise<string> {
     if (res.ok) {
       const code = await res.text();
       if (code && code.length > 50) {
-        cachedBundle = code;
-        lastFetchTime = now;
         console.log(`[Kyro Bundle] Successfully fetched bundle from GitHub (${code.length} bytes)`);
         return code;
       }
