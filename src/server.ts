@@ -3,7 +3,7 @@ import os from 'node:os';
 import process from 'node:process';
 import { URL } from 'node:url';
 import { spawn } from 'node:child_process';
-import { mkdirSync, rmSync, existsSync } from 'node:fs';
+import { mkdirSync, rmSync, existsSync, cpSync } from 'node:fs';
 import { join } from 'node:path';
 import { randomBytes } from 'node:crypto';
 
@@ -20,7 +20,38 @@ const PORT = Number(process.env.PORT) || 3099;
 const CF_CLIENT_ID = process.env.CF_CLIENT_ID || process.env.CLOUDFLARE_CLIENT_ID || '';
 const CF_CLIENT_SECRET = process.env.CF_CLIENT_SECRET || process.env.CLOUDFLARE_CLIENT_SECRET || '';
 
-// ── Helpers ───────────────────────────────────────────────────────────────────
+// ── Template Warmup Store ───────────────────────────────────────────────────
+
+const TEMPLATE_CACHE_DIR = join(os.tmpdir(), 'kyro-template-cache');
+let isWarming = false;
+let isTemplateReady = false;
+
+async function warmTemplateStore() {
+  if (isWarming || isTemplateReady) return;
+  isWarming = true;
+  console.log('[Template Warmup] ⚡ Pre-warming Kyro template in background…');
+
+  try {
+    if (!existsSync(TEMPLATE_CACHE_DIR)) {
+      mkdirSync(TEMPLATE_CACHE_DIR, { recursive: true });
+      await new Promise<void>((resolve, reject) => {
+        const child = spawn('git', ['clone', '--depth=1', 'https://github.com/danielDozie/kyro-cms.git', '.'], { cwd: TEMPLATE_CACHE_DIR, shell: true });
+        child.on('exit', (code) => (code === 0 ? resolve() : reject(new Error(`git clone exited with code ${code}`))));
+      });
+      await new Promise<void>((resolve, reject) => {
+        const child = spawn('pnpm', ['install', '--ignore-scripts', '--prefer-offline', '--no-frozen-lockfile'], { cwd: TEMPLATE_CACHE_DIR, shell: true });
+        child.on('exit', (code) => (code === 0 ? resolve() : reject(new Error(`pnpm install exited with code ${code}`))));
+      });
+    }
+    isTemplateReady = true;
+    console.log('[Template Warmup] ✔ Pre-installed Kyro template is READY for instant deploys!');
+  } catch (err) {
+    console.warn('[Template Warmup Warning]:', err);
+    isTemplateReady = false;
+  } finally {
+    isWarming = false;
+  }
+}
 
 function sendSSE(res: ServerResponse, data: unknown) {
   res.write(`data: ${JSON.stringify(data)}\n\n`);
@@ -294,29 +325,34 @@ const server = createServer(async (req: IncomingMessage, res: ServerResponse) =>
     mkdirSync(baseDir, { recursive: true });
 
     try {
-      // 1. Fetch Kyro CMS Template (git clone --depth=1 is ~1-2 seconds)
-      sendSSE(res, { type: 'info', step: 'scaffold', message: '⚡ Fetching Kyro CMS template from GitHub…' });
-      await spawnStreaming(
-        res,
-        'scaffold',
-        'git',
-        ['clone', '--depth=1', 'https://github.com/danielDozie/kyro-cms.git', projectDir],
-        { cwd: baseDir }
-      );
-      sendSSE(res, { type: 'success', step: 'scaffold', message: `✔ Kyro CMS template ready` });
+      if (isTemplateReady && existsSync(TEMPLATE_CACHE_DIR)) {
+        sendSSE(res, { type: 'info', step: 'scaffold', message: '⚡ Instantly copying pre-warmed Kyro CMS template…' });
+        cpSync(TEMPLATE_CACHE_DIR, projectDir, { recursive: true });
+        sendSSE(res, { type: 'success', step: 'scaffold', message: '✔ Pre-warmed Kyro template ready (0.2s)' });
+      } else {
+        // Fallback: Fetch & Install
+        sendSSE(res, { type: 'info', step: 'scaffold', message: '⚡ Fetching Kyro CMS template from GitHub…' });
+        await spawnStreaming(
+          res,
+          'scaffold',
+          'git',
+          ['clone', '--depth=1', 'https://github.com/danielDozie/kyro-cms.git', projectDir],
+          { cwd: baseDir }
+        );
+        sendSSE(res, { type: 'success', step: 'scaffold', message: `✔ Kyro CMS template fetched` });
 
-      // 2. Fast Install Dependencies (~3s using cache)
-      sendSSE(res, { type: 'info', step: 'install', message: '📦 Resolving dependencies (pnpm install)…' });
-      await spawnStreaming(
-        res,
-        'install',
-        'pnpm',
-        ['install', '--ignore-scripts', '--prefer-offline', '--no-frozen-lockfile'],
-        { cwd: projectDir }
-      );
-      sendSSE(res, { type: 'success', step: 'install', message: '✔ Dependencies resolved' });
+        sendSSE(res, { type: 'info', step: 'install', message: '📦 Resolving dependencies (pnpm install)…' });
+        await spawnStreaming(
+          res,
+          'install',
+          'pnpm',
+          ['install', '--ignore-scripts', '--prefer-offline', '--no-frozen-lockfile'],
+          { cwd: projectDir }
+        );
+        sendSSE(res, { type: 'success', step: 'install', message: '✔ Dependencies resolved' });
+      }
 
-      // 3. Build Astro project for Cloudflare Pages
+      // 2. Build Astro project for Cloudflare Pages
       sendSSE(res, { type: 'info', step: 'build', message: '⚡ Compiling Astro + Kyro CMS for Cloudflare Pages (@astrojs/cloudflare)…' });
       const adminDir = join(projectDir, 'admin');
       await spawnStreaming(
@@ -402,4 +438,6 @@ const server = createServer(async (req: IncomingMessage, res: ServerResponse) =>
 
 server.listen(PORT, () => {
   console.log(`🚀 Deploy Server running on port ${PORT}`);
+  // Pre-warm template store in background on startup
+  warmTemplateStore().catch(() => {});
 });
