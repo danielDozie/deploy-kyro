@@ -6,8 +6,7 @@ import { spawn } from 'node:child_process';
 import { mkdirSync, rmSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { randomBytes } from 'node:crypto';
-import { deployDirectToCloudflare } from './cloudflare-api.js';
-import { getKyroWorkerScript } from './worker-template.js';
+
 
 try {
   process.loadEnvFile();
@@ -385,7 +384,7 @@ const server = createServer(async (req: IncomingMessage, res: ServerResponse) =>
       setTimeout(() => {
         try {
           if (existsSync(baseDir)) rmSync(baseDir, { recursive: true, force: true });
-        } catch {}
+        } catch { }
       }, 10_000);
     }
 
