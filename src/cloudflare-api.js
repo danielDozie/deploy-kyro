@@ -78,10 +78,19 @@ export async function createD1Database(apiToken, accountId, dbName) {
  * 5. Deploy Worker Script with D1, R2, and secret bindings
  */
 export async function uploadWorkerScript(apiToken, accountId, workerName, scriptContent, d1DatabaseId, r2BucketName, adminEmail, adminPassword) {
-    const formData = new FormData();
+    const sanitizedScript = scriptContent
+        .replace(/from\s*['"]crypto['"]/g, 'from "node:crypto"')
+        .replace(/from\s*['"]path['"]/g, 'from "node:path"')
+        .replace(/from\s*['"]buffer['"]/g, 'from "node:buffer"')
+        .replace(/from\s*['"]stream['"]/g, 'from "node:stream"')
+        .replace(/from\s*['"]events['"]/g, 'from "node:events"')
+        .replace(/from\s*['"]util['"]/g, 'from "node:util"')
+        .replace(/from\s*['"]process['"]/g, 'from "node:process"')
+        .replace(/from\s*['"]fs['"]/g, 'from "node:fs"')
+        .replace(/from\s*['"]os['"]/g, 'from "node:os"');
     const metadata = {
         main_module: 'worker.mjs',
-        compatibility_date: '2024-01-01',
+        compatibility_date: '2024-11-01',
         compatibility_flags: ['nodejs_compat'],
         bindings: [
             { type: 'd1', name: 'DB', id: d1DatabaseId },
@@ -90,8 +99,9 @@ export async function uploadWorkerScript(apiToken, accountId, workerName, script
             ...(adminPassword ? [{ type: 'plain_text', name: 'ADMIN_PASSWORD', text: adminPassword }] : []),
         ],
     };
+    const formData = new FormData();
     formData.append('metadata', new Blob([JSON.stringify(metadata)], { type: 'application/json' }), 'metadata.json');
-    formData.append('worker.mjs', new Blob([scriptContent], { type: 'application/javascript+module' }), 'worker.mjs');
+    formData.append('worker.mjs', new Blob([sanitizedScript], { type: 'application/javascript+module' }), 'worker.mjs');
     const res = await fetch(`${CF_API_BASE}/accounts/${accountId}/workers/scripts/${workerName}`, {
         method: 'PUT',
         headers: {
