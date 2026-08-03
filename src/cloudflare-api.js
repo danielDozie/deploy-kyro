@@ -90,8 +90,8 @@ export async function uploadWorkerScript(apiToken, accountId, workerName, script
             ...(adminPassword ? [{ type: 'plain_text', name: 'ADMIN_PASSWORD', text: adminPassword }] : []),
         ],
     };
-    formData.append('metadata', new Blob([JSON.stringify(metadata)], { type: 'application/json' }));
-    formData.append('worker.mjs', new Blob([scriptContent], { type: 'application/javascript+module' }));
+    formData.append('metadata', new Blob([JSON.stringify(metadata)], { type: 'application/json' }), 'metadata.json');
+    formData.append('worker.mjs', new Blob([scriptContent], { type: 'application/javascript+module' }), 'worker.mjs');
     const res = await fetch(`${CF_API_BASE}/accounts/${accountId}/workers/scripts/${workerName}`, {
         method: 'PUT',
         headers: {
