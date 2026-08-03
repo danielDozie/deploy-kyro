@@ -78,7 +78,13 @@ export async function createD1Database(apiToken, accountId, dbName) {
  * 5. Deploy Worker Script with D1, R2, and secret bindings
  */
 export async function uploadWorkerScript(apiToken, accountId, workerName, scriptContent, d1DatabaseId, r2BucketName, adminEmail, adminPassword) {
+    const FS_STUB = 'data:text/javascript,export default {}; export const readFileSync=()=>""; export const writeFileSync=()=>{}; export const existsSync=()=>false; export const mkdirSync=()=>{}; export const readdirSync=()=>[]; export const statSync=()=>({isDirectory:()=>false}); export const mkdir=async()=>{}; export const readdir=async()=>[]; export const stat=async()=>({isDirectory:()=>false}); export const rename=async()=>{}; export const unlink=async()=>{}; export const writeFile=async()=>{}; export const readFile=async()=>""; export const promises={mkdir:async()=>{},readdir:async()=>[],stat:async()=>({isDirectory:()=>false}),rename:async()=>{},unlink:async()=>{},writeFile:async()=>{},readFile:async()=>""};';
+    const CP_STUB = 'data:text/javascript,export default {}; export const execSync=()=>""; export const exec=()=>{}; export const spawn=()=>{};';
+    const NET_STUB = 'data:text/javascript,export default {}; export const connect=()=>{}; export const Socket=class{};';
     const sanitizedScript = scriptContent
+        .replace(/from\s*['"](node:)?fs(\/promises)?['"]/g, `from "${FS_STUB}"`)
+        .replace(/from\s*['"](node:)?child_process['"]/g, `from "${CP_STUB}"`)
+        .replace(/from\s*['"](node:)?(net|tls)['"]/g, `from "${NET_STUB}"`)
         .replace(/from\s*['"]crypto['"]/g, 'from "node:crypto"')
         .replace(/from\s*['"]path['"]/g, 'from "node:path"')
         .replace(/from\s*['"]buffer['"]/g, 'from "node:buffer"')
@@ -86,7 +92,6 @@ export async function uploadWorkerScript(apiToken, accountId, workerName, script
         .replace(/from\s*['"]events['"]/g, 'from "node:events"')
         .replace(/from\s*['"]util['"]/g, 'from "node:util"')
         .replace(/from\s*['"]process['"]/g, 'from "node:process"')
-        .replace(/from\s*['"]fs['"]/g, 'from "node:fs"')
         .replace(/from\s*['"]os['"]/g, 'from "node:os"');
     const metadata = {
         main_module: 'worker.mjs',
