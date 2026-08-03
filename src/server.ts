@@ -277,6 +277,7 @@ const server = createServer(async (req: IncomingMessage, res: ServerResponse) =>
     const projectName = (body.projectName || `kyro-app-${Date.now()}`).trim();
     const adminEmail: string = body.adminEmail || `admin@${projectName}.local`;
     const adminPassword: string = body.adminPassword || generatePassword();
+    const workerName: string = (body.workerName || projectName).trim().toLowerCase().replace(/[^a-z0-9-]/g, '-');
 
     const cloudflareApiToken: string =
       body.cloudflareApiToken || body.token || body.accessToken || process.env.CLOUDFLARE_API_TOKEN || '';
@@ -288,36 +289,89 @@ const server = createServer(async (req: IncomingMessage, res: ServerResponse) =>
       return;
     }
 
-    const workerName: string = (body.workerName || projectName).trim().toLowerCase().replace(/[^a-z0-9-]/g, '-');
-    const r2Bucket: string = (body.r2Bucket || 'kyro-media').trim().toLowerCase().replace(/[^a-z0-9-]/g, '-');
-    const dbName: string = (body.dbName || 'kyro-db').trim().toLowerCase().replace(/[^a-z0-9-]/g, '-');
+    const deployId = randomBytes(4).toString('hex');
+    const baseDir = join(os.tmpdir(), `kyro-deploy-${deployId}`);
+    const projectDir = join(baseDir, projectName);
+    mkdirSync(baseDir, { recursive: true });
 
     try {
-      sendSSE(res, { type: 'info', step: 'start', message: '🚀 Fetching Kyro CMS core engine bundle…' });
+      // 1. Scaffold Astro + Kyro CMS Project
+      sendSSE(res, { type: 'info', step: 'scaffold', message: '🛠 Scaffolding fresh Astro + Kyro CMS project…' });
+      await spawnStreaming(
+        res,
+        'scaffold',
+        'npx',
+        [
+          '--yes',
+          'create-kyro@latest',
+          projectDir,
+          '--template=minimal',
+          '--database=sqlite',
+          `--admin-email=${adminEmail}`,
+          '--non-interactive',
+        ],
+        { cwd: baseDir, env: { ...process.env, npm_config_loglevel: 'warn' } }
+      );
+      sendSSE(res, { type: 'success', step: 'scaffold', message: `✔ Project scaffolded cleanly` });
 
-      const scriptContent = await getKyroWorkerScript(body.bundleUrl);
+      // 2. Build Astro project for Cloudflare Pages
+      sendSSE(res, { type: 'info', step: 'build', message: '⚡ Compiling Astro + Kyro CMS for Cloudflare Pages (@astrojs/cloudflare)…' });
+      await spawnStreaming(
+        res,
+        'build',
+        'npx',
+        ['astro', 'build'],
+        {
+          cwd: projectDir,
+          env: {
+            ...process.env,
+            CLOUDFLARE: 'true',
+            CF_PAGES: 'true',
+            ADMIN_EMAIL: adminEmail,
+            ADMIN_PASSWORD: adminPassword,
+          },
+        }
+      );
+      sendSSE(res, { type: 'success', step: 'build', message: '✔ Astro Cloudflare bundle compiled (dist/)' });
 
-      const result = await deployDirectToCloudflare({
-        apiToken: cloudflareApiToken,
-        workerName,
-        r2BucketName: r2Bucket,
-        dbName,
-        adminEmail,
-        adminPassword,
-        scriptContent,
-        onProgress: (step, message) => {
-          sendSSE(res, { type: 'info', step, message });
-        },
-      });
+      // 3. Deploy to Cloudflare Pages via Wrangler
+      sendSSE(res, { type: 'info', step: 'deploy', message: `☁️ Deploying to Cloudflare Pages ("${workerName}")…` });
+      const deployOutput = await spawnStreaming(
+        res,
+        'deploy',
+        'npx',
+        [
+          'wrangler',
+          'pages',
+          'deploy',
+          'dist',
+          `--project-name=${workerName}`,
+          '--branch=main',
+          '--commit-dirty=true',
+        ],
+        {
+          cwd: projectDir,
+          env: {
+            ...process.env,
+            CLOUDFLARE_API_TOKEN: cloudflareApiToken,
+          },
+        }
+      );
+
+      // Extract live URL from wrangler output or construct fallback pages.dev URL
+      let liveUrl = `https://${workerName}.pages.dev`;
+      const urlMatch = deployOutput.match(/https:\/\/[a-z0-9-]+\.pages\.dev/i);
+      if (urlMatch) {
+        liveUrl = urlMatch[0];
+      }
 
       sendSSE(res, {
         type: 'done',
         data: {
-          liveUrl: result.liveUrl,
+          liveUrl,
           adminEmail,
           adminPassword,
-          accountId: result.accountId,
-          workerName: result.workerName,
+          workerName,
         },
       });
     } catch (err: any) {
@@ -327,6 +381,12 @@ const server = createServer(async (req: IncomingMessage, res: ServerResponse) =>
     } finally {
       clearInterval(pingInterval);
       res.end();
+      // Best-effort temp dir cleanup
+      setTimeout(() => {
+        try {
+          if (existsSync(baseDir)) rmSync(baseDir, { recursive: true, force: true });
+        } catch {}
+      }, 10_000);
     }
 
     return;
