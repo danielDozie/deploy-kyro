@@ -11,7 +11,7 @@ const CACHE_TTL_MS = 10 * 60 * 1000; // Cache for 10 minutes
 // Configurable bundle URL (GitHub raw, GitHub release asset, or CDN)
 const DEFAULT_GITHUB_BUNDLE_URL =
   process.env.KYRO_BUNDLE_URL ||
-  'https://raw.githubusercontent.com/danielDozie/kyro/main/dist/worker.mjs';
+  'https://raw.githubusercontent.com/danielDozie/kyro-cms/main/dist/index.js';
 
 /**
  * Fetch the latest Kyro CMS Core JavaScript bundle from GitHub
