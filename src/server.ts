@@ -6,6 +6,8 @@ import { spawn } from 'node:child_process';
 import { mkdirSync, rmSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { randomBytes } from 'node:crypto';
+import { deployDirectToCloudflare } from './cloudflare-api.js';
+import { getKyroWorkerScript } from './worker-template.js';
 
 try {
   process.loadEnvFile();
@@ -273,121 +275,49 @@ const server = createServer(async (req: IncomingMessage, res: ServerResponse) =>
     }, 10_000);
 
     const projectName = (body.projectName || `kyro-app-${Date.now()}`).trim();
-    const template: string = body.template || 'minimal';
-    const database: string = body.database === 'postgres' ? 'postgres' : 'sqlite';
     const adminEmail: string = body.adminEmail || `admin@${projectName}.local`;
-    const adminPassword: string =
-      body.adminPassword || generatePassword();
+    const adminPassword: string = body.adminPassword || generatePassword();
 
     const cloudflareApiToken: string =
-      body.cloudflareApiToken || body.token || body.accessToken || '';
+      body.cloudflareApiToken || body.token || body.accessToken || process.env.CLOUDFLARE_API_TOKEN || '';
 
-    const workerName: string = (body.workerName || projectName).trim();
-    const r2Bucket: string = (body.r2Bucket || `kyro-media-${Date.now()}`).trim();
-    const databaseUrl: string = body.databaseUrl || '';
-    const hyperdriveName: string = body.hyperdriveName || '';
+    if (!cloudflareApiToken) {
+      clearInterval(pingInterval);
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Missing Cloudflare API Token' }));
+      return;
+    }
 
-    // Create a unique temp directory for this deployment
-    const deployId = randomBytes(4).toString('hex');
-    const baseDir = join(os.tmpdir(), `kyro-deploy-${deployId}`);
-    const projectDir = join(baseDir, projectName);
-    mkdirSync(baseDir, { recursive: true });
+    const workerName: string = (body.workerName || projectName).trim().toLowerCase().replace(/[^a-z0-9-]/g, '-');
+    const r2Bucket: string = (body.r2Bucket || `kyro-media-${Date.now()}`).trim().toLowerCase().replace(/[^a-z0-9-]/g, '-');
+    const dbName: string = (body.dbName || `kyro-db-${Date.now()}`).trim().toLowerCase().replace(/[^a-z0-9-]/g, '-');
 
     try {
-      // ── Step 1: Scaffold ──────────────────────────────────────────────────
-      sendSSE(res, { type: 'info', step: 'scaffold', message: '🛠  Bootstrapping fresh Kyro project…' });
+      sendSSE(res, { type: 'info', step: 'start', message: '🚀 Fetching Kyro CMS core engine bundle…' });
 
-      await spawnStreaming(
-        res,
-        'scaffold',
-        'npx',
-        [
-          '--yes',
-          'create-kyro@latest',
-          projectDir,
-          `--template=${template}`,
-          `--database=${database}`,
-          `--admin-email=${adminEmail}`,
-          '--non-interactive',
-        ],
-        { cwd: baseDir, env: { ...process.env, npm_config_loglevel: 'warn' } }
-      );
+      const scriptContent = await getKyroWorkerScript(body.bundleUrl);
 
-      sendSSE(res, {
-        type: 'success',
-        step: 'scaffold',
-        message: `✔ Project scaffolded in ${projectDir}`,
+      const result = await deployDirectToCloudflare({
+        apiToken: cloudflareApiToken,
+        workerName,
+        r2BucketName: r2Bucket,
+        dbName,
+        adminEmail,
+        adminPassword,
+        scriptContent,
+        onProgress: (step, message) => {
+          sendSSE(res, { type: 'info', step, message });
+        },
       });
-
-      // ── Step 2: Deploy via CLI ────────────────────────────────────────────
-      sendSSE(res, {
-        type: 'info',
-        step: 'deploy',
-        message: '☁️  Deploying to Cloudflare Workers via CLI…',
-      });
-
-      const cliArgs = [
-        '@kyro-cms/core',
-        'deploy',
-        'cloudflare',
-        '--non-interactive',
-        '--quiet',
-        '--json',
-        '--name', workerName,
-        '--r2-bucket', r2Bucket,
-        '--email', adminEmail,
-        '--password', adminPassword,
-      ];
-
-      if (database === 'postgres') {
-        cliArgs.push('--database', 'postgres');
-        if (databaseUrl) cliArgs.push('--database-url', databaseUrl);
-        if (hyperdriveName) cliArgs.push('--hyperdrive-name', hyperdriveName);
-      }
-
-      const cliEnv: NodeJS.ProcessEnv = {
-        ...process.env,
-        // Pass the Cloudflare token so wrangler can auth without a browser login
-        ...(cloudflareApiToken ? { CLOUDFLARE_API_TOKEN: cloudflareApiToken } : {}),
-      };
-
-      const cliOutput = await spawnStreaming(
-        res,
-        'deploy',
-        'npx',
-        cliArgs,
-        { cwd: projectDir, env: cliEnv }
-      );
-
-      // Parse the final JSON line emitted by `kyro deploy cloudflare --json`
-      const lines = cliOutput.split('\n').reverse();
-      let resultData: { ok: boolean; liveUrl?: string; adminEmail?: string; adminPassword?: string } | null = null;
-
-      for (const line of lines) {
-        const trimmed = line.trim();
-        if (trimmed.startsWith('{')) {
-          try {
-            const parsed = JSON.parse(trimmed);
-            if (typeof parsed.ok === 'boolean') {
-              resultData = parsed;
-              break;
-            }
-          } catch {
-            // not the JSON line we're looking for
-          }
-        }
-      }
-
-      if (!resultData?.ok) {
-        throw new Error(resultData?.adminEmail ?? 'Deploy CLI did not report success');
-      }
 
       sendSSE(res, {
         type: 'done',
         data: {
-          liveUrl: resultData.liveUrl ?? '',
-          adminEmail: resultData.adminEmail ?? adminEmail,
-          adminPassword: resultData.adminPassword ?? adminPassword,
+          liveUrl: result.liveUrl,
+          adminEmail,
+          adminPassword,
+          accountId: result.accountId,
+          workerName: result.workerName,
         },
       });
     } catch (err: any) {
@@ -397,14 +327,6 @@ const server = createServer(async (req: IncomingMessage, res: ServerResponse) =>
     } finally {
       clearInterval(pingInterval);
       res.end();
-      // Clean up temp dir in background (non-blocking, best-effort)
-      setTimeout(() => {
-        try {
-          if (existsSync(baseDir)) rmSync(baseDir, { recursive: true, force: true });
-        } catch {
-          // non-fatal
-        }
-      }, 5_000);
     }
 
     return;
