@@ -249,22 +249,15 @@ const server = createServer(async (req, res) => {
         const projectDir = join(baseDir, projectName);
         mkdirSync(baseDir, { recursive: true });
         try {
-            // 1. Scaffold Astro + Kyro CMS Project
-            sendSSE(res, { type: 'info', step: 'scaffold', message: '🛠 Scaffolding fresh Astro + Kyro CMS project…' });
-            await spawnStreaming(res, 'scaffold', 'npx', [
-                '--yes',
-                'create-kyro@latest',
-                projectDir,
-                '--template=minimal',
-                '--database=sqlite',
-                `--admin-email=${adminEmail}`,
-                '--non-interactive',
-            ], { cwd: baseDir, env: { ...process.env, npm_config_loglevel: 'warn' } });
-            sendSSE(res, { type: 'success', step: 'scaffold', message: `✔ Project scaffolded cleanly` });
+            // 1. Fetch Kyro CMS Template (git clone --depth=1 is ~1-2 seconds)
+            sendSSE(res, { type: 'info', step: 'scaffold', message: '⚡ Fetching Kyro CMS template from GitHub…' });
+            await spawnStreaming(res, 'scaffold', 'git', ['clone', '--depth=1', 'https://github.com/danielDozie/kyro-cms.git', projectDir], { cwd: baseDir });
+            sendSSE(res, { type: 'success', step: 'scaffold', message: `✔ Kyro CMS template ready` });
             // 2. Build Astro project for Cloudflare Pages
             sendSSE(res, { type: 'info', step: 'build', message: '⚡ Compiling Astro + Kyro CMS for Cloudflare Pages (@astrojs/cloudflare)…' });
+            const adminDir = join(projectDir, 'admin');
             await spawnStreaming(res, 'build', 'npx', ['astro', 'build'], {
-                cwd: projectDir,
+                cwd: existsSync(adminDir) ? adminDir : projectDir,
                 env: {
                     ...process.env,
                     CLOUDFLARE: 'true',
@@ -285,7 +278,7 @@ const server = createServer(async (req, res) => {
                 '--branch=main',
                 '--commit-dirty=true',
             ], {
-                cwd: projectDir,
+                cwd: existsSync(adminDir) ? adminDir : projectDir,
                 env: {
                     ...process.env,
                     CLOUDFLARE_API_TOKEN: cloudflareApiToken,
