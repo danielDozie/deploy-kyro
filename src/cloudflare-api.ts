@@ -125,9 +125,9 @@ export async function uploadWorkerScript(
   adminEmail: string,
   adminPassword?: string
 ): Promise<void> {
-  const FS_STUB = 'data:text/javascript,export default {}; export const readFileSync=()=>""; export const writeFileSync=()=>{}; export const existsSync=()=>false; export const mkdirSync=()=>{}; export const readdirSync=()=>[]; export const statSync=()=>({isDirectory:()=>false}); export const mkdir=async()=>{}; export const readdir=async()=>[]; export const stat=async()=>({isDirectory:()=>false}); export const rename=async()=>{}; export const unlink=async()=>{}; export const writeFile=async()=>{}; export const readFile=async()=>""; export const promises={mkdir:async()=>{},readdir:async()=>[],stat:async()=>({isDirectory:()=>false}),rename:async()=>{},unlink:async()=>{},writeFile:async()=>{},readFile:async()=>""};';
-  const CP_STUB = 'data:text/javascript,export default {}; export const execSync=()=>""; export const exec=()=>{}; export const spawn=()=>{};';
-  const NET_STUB = 'data:text/javascript,export default {}; export const connect=()=>{}; export const Socket=class{};';
+  const FS_STUB = "data:text/javascript,export default {}; export const readFileSync=()=>''; export const writeFileSync=()=>{}; export const existsSync=()=>false; export const mkdirSync=()=>{}; export const readdirSync=()=>[]; export const statSync=()=>({isDirectory:()=>false}); export const mkdir=async()=>{}; export const readdir=async()=>[]; export const stat=async()=>({isDirectory:()=>false}); export const rename=async()=>{}; export const unlink=async()=>{}; export const writeFile=async()=>{}; export const readFile=async()=>''; export const promises={mkdir:async()=>{},readdir:async()=>[],stat:async()=>({isDirectory:()=>false}),rename:async()=>{},unlink:async()=>{},writeFile:async()=>{},readFile:async()=>''};";
+  const CP_STUB = "data:text/javascript,export default {}; export const execSync=()=>''; export const exec=()=>{}; export const spawn=()=>{};";
+  const NET_STUB = "data:text/javascript,export default {}; export const connect=()=>{}; export const Socket=class{};";
 
   const sanitizedScript = scriptContent
     .replace(/from\s*['"](node:)?fs(\/promises)?['"]/g, `from "${FS_STUB}"`)
