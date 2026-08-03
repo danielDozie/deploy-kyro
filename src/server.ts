@@ -289,8 +289,8 @@ const server = createServer(async (req: IncomingMessage, res: ServerResponse) =>
     }
 
     const workerName: string = (body.workerName || projectName).trim().toLowerCase().replace(/[^a-z0-9-]/g, '-');
-    const r2Bucket: string = (body.r2Bucket || `kyro-media-${Date.now()}`).trim().toLowerCase().replace(/[^a-z0-9-]/g, '-');
-    const dbName: string = (body.dbName || `kyro-db-${Date.now()}`).trim().toLowerCase().replace(/[^a-z0-9-]/g, '-');
+    const r2Bucket: string = (body.r2Bucket || 'kyro-media').trim().toLowerCase().replace(/[^a-z0-9-]/g, '-');
+    const dbName: string = (body.dbName || 'kyro-db').trim().toLowerCase().replace(/[^a-z0-9-]/g, '-');
 
     try {
       sendSSE(res, { type: 'info', step: 'start', message: '🚀 Fetching Kyro CMS core engine bundle…' });

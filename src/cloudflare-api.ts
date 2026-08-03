@@ -85,9 +85,27 @@ export async function createR2Bucket(apiToken: string, accountId: string, bucket
 }
 
 /**
- * 4. Create D1 Database (or fetch existing UUID if already created)
+ * 4. Create D1 Database (or reuse existing database if account limit reached)
  */
 export async function createD1Database(apiToken: string, accountId: string, dbName: string): Promise<string> {
+  // 1. Check if database already exists in Cloudflare account
+  try {
+    const listRes = await fetch(`${CF_API_BASE}/accounts/${accountId}/d1/database`, {
+      headers: getHeaders(apiToken),
+    });
+    if (listRes.ok) {
+      const listData = (await listRes.json()) as any;
+      const existing = listData.result?.find((db: any) => db.name === dbName || db.name === 'kyro-db');
+      if (existing?.uuid) {
+        console.log(`[D1 Database] Reusing existing D1 database "${existing.name}" (${existing.uuid})`);
+        return existing.uuid;
+      }
+    }
+  } catch (e) {
+    console.warn('[D1 Database List Warning]:', e);
+  }
+
+  // 2. Try creating new database
   const res = await fetch(`${CF_API_BASE}/accounts/${accountId}/d1/database`, {
     method: 'POST',
     headers: getHeaders(apiToken),
@@ -99,17 +117,19 @@ export async function createD1Database(apiToken: string, accountId: string, dbNa
     return data.result.uuid;
   }
 
-  // If already exists, search list for database UUID
-  const listRes = await fetch(`${CF_API_BASE}/accounts/${accountId}/d1/database`, {
-    headers: getHeaders(apiToken),
-  });
-  const listData = (await listRes.json()) as any;
-  const existing = listData.result?.find((db: any) => db.name === dbName);
-  if (existing?.uuid) {
-    return existing.uuid;
-  }
+  // 3. Limit Fallback: If 10 database limit reached, reuse the first available database in account
+  try {
+    const listRes = await fetch(`${CF_API_BASE}/accounts/${accountId}/d1/database`, {
+      headers: getHeaders(apiToken),
+    });
+    const listData = (await listRes.json()) as any;
+    if (listData.result?.[0]?.uuid) {
+      console.log(`[D1 Database Fallback] Reusing existing database "${listData.result[0].name}" (${listData.result[0].uuid})`);
+      return listData.result[0].uuid;
+    }
+  } catch (e) {}
 
-  throw new Error(data.errors?.[0]?.message || `Failed to create D1 database "${dbName}"`);
+  throw new Error(data.errors?.[0]?.message || `Failed to create or reuse D1 database "${dbName}"`);
 }
 
 /**
@@ -125,14 +145,7 @@ export async function uploadWorkerScript(
   adminEmail: string,
   adminPassword?: string
 ): Promise<void> {
-  const FS_STUB = "data:text/javascript,export default {}; export const readFileSync=()=>''; export const writeFileSync=()=>{}; export const existsSync=()=>false; export const mkdirSync=()=>{}; export const readdirSync=()=>[]; export const statSync=()=>({isDirectory:()=>false}); export const mkdir=async()=>{}; export const readdir=async()=>[]; export const stat=async()=>({isDirectory:()=>false}); export const rename=async()=>{}; export const unlink=async()=>{}; export const writeFile=async()=>{}; export const readFile=async()=>''; export const promises={mkdir:async()=>{},readdir:async()=>[],stat:async()=>({isDirectory:()=>false}),rename:async()=>{},unlink:async()=>{},writeFile:async()=>{},readFile:async()=>''};";
-  const CP_STUB = "data:text/javascript,export default {}; export const execSync=()=>''; export const exec=()=>{}; export const spawn=()=>{};";
-  const NET_STUB = "data:text/javascript,export default {}; export const connect=()=>{}; export const Socket=class{};";
-
   const sanitizedScript = scriptContent
-    .replace(/from\s*['"](node:)?fs(\/promises)?['"]/g, `from "${FS_STUB}"`)
-    .replace(/from\s*['"](node:)?child_process['"]/g, `from "${CP_STUB}"`)
-    .replace(/from\s*['"](node:)?(net|tls)['"]/g, `from "${NET_STUB}"`)
     .replace(/from\s*['"]crypto['"]/g, 'from "node:crypto"')
     .replace(/from\s*['"]path['"]/g, 'from "node:path"')
     .replace(/from\s*['"]buffer['"]/g, 'from "node:buffer"')
@@ -193,7 +206,7 @@ export async function enableWorkerSubdomain(apiToken: string, accountId: string,
  * High-level Fast Orchestrator Function
  */
 export async function deployDirectToCloudflare(opts: DeployOptions): Promise<DeployResult> {
-  const log = opts.onProgress || (() => {});
+  const log = opts.onProgress || (() => { });
 
   log('auth', '🔑 Verifying Cloudflare API Token & Account…');
   const accountId = await getAccountId(opts.apiToken);

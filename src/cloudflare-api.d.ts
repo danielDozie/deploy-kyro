@@ -34,7 +34,7 @@ export declare function getWorkersSubdomain(apiToken: string, accountId: string)
  */
 export declare function createR2Bucket(apiToken: string, accountId: string, bucketName: string): Promise<string>;
 /**
- * 4. Create D1 Database (or fetch existing UUID if already created)
+ * 4. Create D1 Database (or reuse existing database if account limit reached)
  */
 export declare function createD1Database(apiToken: string, accountId: string, dbName: string): Promise<string>;
 /**
