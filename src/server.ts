@@ -305,7 +305,18 @@ const server = createServer(async (req: IncomingMessage, res: ServerResponse) =>
       );
       sendSSE(res, { type: 'success', step: 'scaffold', message: `✔ Kyro CMS template ready` });
 
-      // 2. Build Astro project for Cloudflare Pages
+      // 2. Fast Install Dependencies (~3s using cache)
+      sendSSE(res, { type: 'info', step: 'install', message: '📦 Resolving dependencies (pnpm install)…' });
+      await spawnStreaming(
+        res,
+        'install',
+        'pnpm',
+        ['install', '--ignore-scripts', '--prefer-offline', '--no-frozen-lockfile'],
+        { cwd: projectDir }
+      );
+      sendSSE(res, { type: 'success', step: 'install', message: '✔ Dependencies resolved' });
+
+      // 3. Build Astro project for Cloudflare Pages
       sendSSE(res, { type: 'info', step: 'build', message: '⚡ Compiling Astro + Kyro CMS for Cloudflare Pages (@astrojs/cloudflare)…' });
       const adminDir = join(projectDir, 'admin');
       await spawnStreaming(
